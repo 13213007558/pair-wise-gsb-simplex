@@ -8,7 +8,38 @@ A naive pure-Ruby implementation of the Simplex algorithm for solving linear pro
 
 ### Changes
 
+**1.3**: Adds a pure-Ruby Lemke complementary pivot solver for linear complementarity problems.
+
 **1.2**: Raises `Simplex::UnboundedProblem` if the problem is unbounded.
+
+### Linear complementarity
+
+To solve an LCP
+
+    find z >= 0, w = Mz + q >= 0, with z_i * w_i = 0 for every i
+
+use `LCP`:
+
+    > result = LCP.solve(
+      [[2, 1], [1, 2]],
+      [-1, -1]
+    )
+    > result.status
+    => :solved
+    > result.solution
+    => [[(1/3), (1/3)], [(0/1), (0/1)]]
+
+The solver uses an exact rational Lemke complementary pivot path rather than a
+floating-point penalty objective. `result.iterations` records the entering and
+leaving variables, ratios, blocking candidates, basis, and tableau for every
+pivot.
+
+`result.status` is one of:
+
+ * `:solved`: either `q >= 0`, or the artificial variable `z0` left the basis;
+ * `:secondary_ray`: the driving variable is unblocked. `result.ray` contains the vertex,
+   direction, non-negativity evidence, augmented residuals, and complementary products;
+ * `:iteration_limit`: the pivot limit was reached.
 
 ### Why?
 

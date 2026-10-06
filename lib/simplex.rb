@@ -1,3 +1,5 @@
+require_relative "lcp"
+
 require 'matrix'
 
 class Vector
@@ -189,4 +191,3 @@ class Simplex
   end
 
 end
-
