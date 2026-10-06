@@ -65,3 +65,37 @@ You can manually iterate the algorithm, and review the tableau at each step. For
       0.000   *1.500   -0.500    1.000  |    1.000
 
 The asterisk indicates what will be the pivot row and column for the next pivot.
+
+### Lexicographic objectives
+
+`Simplex::Lexicographic` solves several objectives in explicit priority
+order instead of guessing one set of "big" weights to add up. Each
+objective is optimized only over the solutions that are optimal for every
+higher-priority objective, so a lower priority can never make a higher one
+worse -- not even by an epsilon. All arithmetic is exact (`Rational`), and
+directions can be mixed per level:
+
+    > lex = Simplex::Lexicographic.new(
+      [
+        { coefficients: [1, 1], direction: :max }, # total output first
+        { coefficients: [1, 0], direction: :min }, # then cost
+      ],
+      [[2, 1], [1, 2]],   # same constraints as above
+      [4, 3]
+    )
+    > lex.solution
+    => [(5/3), (2/3)]
+    > lex.objective_values
+    => [(7/3), (5/3)]
+
+Every level keeps its achieved (exact) objective value and the evidence
+that it is optimal given the higher-priority levels:
+
+    > lex.levels[0].value
+    => (7/3)
+    > lex.levels[0].evidence
+    => { reduced_costs: [...], improving_columns: [], optimal: true }
+
+`improving_columns` lists the variables that could still improve that
+level without degrading any higher-priority level; at the final solution
+it is empty for every level.

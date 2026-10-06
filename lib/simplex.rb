@@ -93,7 +93,7 @@ class Simplex
     @b[pivot_row] = pivot_ratio * @b[pivot_row]
 
     # update objective
-    @c -= @c[pivot_column] * @a[pivot_row]
+    update_objective_rows(pivot_row, pivot_column)
 
     # update A and B
     (row_indices - [pivot_row]).each do |row_ix|
@@ -110,6 +110,12 @@ class Simplex
     @basic_vars.delete(from)
     @basic_vars << to
     @basic_vars.sort!
+  end
+
+  # Hook: called during pivot after the pivot row has been normalized.
+  # Subclasses with extra objective rows override this to keep them in sync.
+  def update_objective_rows(pivot_row, pivot_column)
+    @c -= @c[pivot_column] * @a[pivot_row]
   end
 
   def pivot_row(column_ix)
@@ -190,3 +196,4 @@ class Simplex
 
 end
 
+require 'simplex/lexicographic'
