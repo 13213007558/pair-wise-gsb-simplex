@@ -65,3 +65,38 @@ You can manually iterate the algorithm, and review the tableau at each step. For
       0.000   *1.500   -0.500    1.000  |    1.000
 
 The asterisk indicates what will be the pivot row and column for the next pivot.
+
+LCP (Linear Complementarity Problem)
+------------------------------------
+
+The `LCP` class solves complementarity problems with Lemke's complementary
+pivot algorithm on an explicit tableau (exact Rational arithmetic):
+
+    find z >= 0 such that w = Mz + q >= 0 and z_i * w_i == 0 for every i
+
+    > result = LCP.solve(
+      [[2, 1], [1, 2]],   # M
+      [-5, -6]            # q
+    )
+    > result.status
+    => :solved
+    > result.z
+    => [(4/3), (7/3)]
+    > result.w
+    => [(0/1), (0/1)]
+
+A solution is only reported when the artificial variable `z0` leaves the
+basis. If the entering column offers no legal pivot, the algorithm stops on a
+secondary ray and returns `:secondary_ray` with the ray as evidence:
+
+    > result = LCP.solve([[0, 0], [0, 0]], [-1, -2])
+    > result.status
+    => :secondary_ray
+    > result.ray[:entering]
+    => "z2"
+    > result.ray[:message]
+    => "no positive entry in the column of z2: ..."
+
+Every pivot of the complementary path is recorded in `result.iterations`
+(entering/leaving variables, pivot row, ratio-test candidates, and a
+human-readable note), so the path to the solution is fully explainable.
