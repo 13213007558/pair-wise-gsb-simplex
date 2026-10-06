@@ -93,7 +93,7 @@ class Simplex
     @b[pivot_row] = pivot_ratio * @b[pivot_row]
 
     # update objective
-    @c -= @c[pivot_column] * @a[pivot_row]
+    update_objective(pivot_row, pivot_column)
 
     # update A and B
     (row_indices - [pivot_row]).each do |row_ix|
@@ -130,6 +130,10 @@ class Simplex
     column_indices.detect do |column_ix|
       @a[pivot_row][column_ix] == 1 and @basic_vars.include?(column_ix)
     end
+  end
+
+  def update_objective(pivot_row, pivot_column)
+    @c -= @c[pivot_column] * @a[pivot_row]
   end
 
   def row_indices
@@ -189,4 +193,3 @@ class Simplex
   end
 
 end
-

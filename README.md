@@ -65,3 +65,37 @@ You can manually iterate the algorithm, and review the tableau at each step. For
       0.000   *1.500   -0.500    1.000  |    1.000
 
 The asterisk indicates what will be the pivot row and column for the next pivot.
+
+### Lexicographic objectives
+
+`LexicographicSimplex` solves problems with several objectives ordered by
+strict priority -- e.g. a scheduler that first minimizes violations, then
+minimizes cost, and only then optimizes fairness -- instead of guessing a
+big weight for a weighted sum (any fixed weight can pick the wrong answer
+once the problem is scaled).
+
+Each objective is optimized exactly, in priority order, and later
+objectives can only re-optimize within the solutions that keep every
+higher-priority objective at its exact optimal value. Objectives can mix
+directions (`:max` and `:min`), and all arithmetic is exact (`Rational`).
+
+    > lex = LexicographicSimplex.new(
+      [
+        { coefficients: [1, 1, 0], direction: :max }, # first: max coverage
+        { coefficients: [3, 1, 0], direction: :min }, # then:  min cost
+        { coefficients: [0, 0, 1], direction: :max }, # last:  max fairness
+      ],
+      [[1, 0, 0], [0, 1, 0], [1, 1, 0], [-1, 0, 1], [0, -1, 1]],
+      [6, 6, 10, 0, 0]
+    )
+    > lex.solution
+    => [4, 6, 4]
+    > lex.objective_values
+    => [10, 18, 4]
+
+Each priority layer records its exact optimal value and the evidence of
+its optimality (the objective row of reduced costs, the solution and the
+number of pivots):
+
+    > lex.layers.map { |layer| [layer.direction, layer.value, layer.pivots] }
+    => [[:max, 10, 2], [:min, 18, 1], [:max, 4, 1]]
