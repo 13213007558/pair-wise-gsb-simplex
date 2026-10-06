@@ -74,6 +74,10 @@ class Simplex
     (0...@c.size).to_a
   end
 
+  def objective_row
+    @c.to_a
+  end
+
   def entering_variable
     variables.select { |var| @c[var] < 0 }.
               min_by { |var| @c[var] }
@@ -189,4 +193,3 @@ class Simplex
   end
 
 end
-
