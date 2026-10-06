@@ -223,6 +223,18 @@ class SimplexTest < Test::Unit::TestCase
     end
   end
 
+  def test_dual_values
+    simplex = Simplex.new(
+      [1, 1],
+      [
+        [ 2,  1],
+        [ 1,  2],
+      ],
+      [4, 3]
+    )
+    assert_equal [Rational(1, 3), Rational(1, 3)], simplex.dual_values
+  end
+
   def test_manual_iteration
     simplex = Simplex.new(
       [10, -57, -9, -24],

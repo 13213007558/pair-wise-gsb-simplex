@@ -47,6 +47,14 @@ class Simplex
     @x.to_a[0...@num_non_slack_vars]
   end
 
+  # The optimal dual values (shadow prices) of the constraints, read
+  # off the slack columns of the objective row. Available once the
+  # problem has been solved.
+  def dual_values
+    solve
+    @c.to_a[@num_non_slack_vars..-1]
+  end
+
   def update_solution
     0.upto(@num_vars - 1) {|i| @x[i] = 0 }
 
@@ -190,3 +198,4 @@ class Simplex
 
 end
 
+require 'simplex/column_generation'
