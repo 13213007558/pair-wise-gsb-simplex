@@ -10,7 +10,28 @@ class Simplex
   class UnboundedProblem < StandardError
   end
 
+  # Raised when the constraints cannot be satisfied simultaneously.
+  class InfeasibleProblem < StandardError
+  end
+
+  # Raised when a basis cannot be used for the current model.
+  class BasisError < ArgumentError
+  end
+
+  # A basis saved from a previous solve. Carries the indices of the basic
+  # variables plus a signature of the model it belongs to, so it cannot be
+  # applied blindly to a different model.
+  class Basis
+    attr_reader :basic_vars, :signature
+
+    def initialize(basic_vars, signature)
+      @basic_vars = basic_vars.freeze
+      @signature  = signature
+    end
+  end
+
   attr_accessor :max_pivots
+  attr_reader :pivot_log, :basic_vars
 
   def initialize(c, a, b)
     @pivot_count = 0
@@ -26,15 +47,25 @@ class Simplex
     @a = a.map {|a1| Vector[*(a1.clone + [0]*@num_constraints)]}
     @b = Vector[*b.clone]
 
-    unless @a.all? {|a| a.size == @c.size } and @b.size == @a.length
+    @objective_coeffs = c.clone
+
+    unless @a.all? {|a1| a1.size == @c.size } and @b.size == @a.length
       raise ArgumentError, "Input arrays have mismatched dimensions" 
     end
 
     0.upto(@num_constraints - 1) {|i| @a[i][@num_non_slack_vars + i] = 1 }
 
+    # Pristine copies of the model, so the tableau can be rebuilt from any
+    # basis when warm starting or re-optimizing after a modification.
+    @orig_c = Vector[*@c.to_a]
+    @orig_a = @a.map {|row| Vector[*row.to_a] }
+    @rhs    = Vector[*@b.to_a]
+
     # set initial solution: all non-slack variables = 0
     @x          = Vector[*([0]*@num_vars)]
     @basic_vars = (@num_non_slack_vars...@num_vars).to_a
+    @pivot_log  = []
+    @needs_refactorize = false
     update_solution
   end
 
@@ -59,15 +90,47 @@ class Simplex
   end
 
   def solve
-    while can_improve?
-      @pivot_count += 1
-      raise "Too many pivots" if @pivot_count > max_pivots 
-      pivot
-    end
+    refactorize if @needs_refactorize
+    restore_feasibility
+    pivot while can_improve?
   end
 
   def can_improve?
     !!entering_variable
+  end
+
+  # Use the dual simplex method to recover primal feasibility when the
+  # current basis is dual feasible (all reduced costs non-negative) but
+  # the right-hand side has negative entries. This is the typical
+  # situation after a warm start with a changed rhs or an added
+  # constraint.
+  def restore_feasibility
+    while (row_ix = dual_leaving_row)
+      unless dual_feasible?
+        raise BasisError, "basis is neither primal nor dual feasible"
+      end
+      entering = dual_entering_variable(row_ix)
+      raise InfeasibleProblem unless entering
+      pivot!(row_ix, entering, :dual)
+    end
+  end
+
+  def dual_feasible?
+    @c.all? {|coeff| coeff >= 0 }
+  end
+
+  def primal_feasible?
+    @b.all? {|value| value >= 0 }
+  end
+
+  def dual_leaving_row
+    row_indices.select {|row_ix| @b[row_ix] < 0 }.
+                min_by {|row_ix| @b[row_ix] }
+  end
+
+  def dual_entering_variable(row_ix)
+    column_indices.select {|col_ix| @a[row_ix][col_ix] < 0 }.
+                   min_by {|col_ix| @c[col_ix] / -@a[row_ix][col_ix] }
   end
 
   def variables
@@ -83,7 +146,21 @@ class Simplex
     pivot_column = entering_variable
     pivot_row    = pivot_row(pivot_column)
     raise UnboundedProblem unless pivot_row
-    leaving_var  = basic_variable_in_row(pivot_row)
+    pivot!(pivot_row, pivot_column, :primal)
+  end
+
+  def pivot!(pivot_row, pivot_column, phase)
+    @pivot_count += 1
+    raise "Too many pivots" if @pivot_count > max_pivots 
+
+    leaving_var = basic_variable_in_row(pivot_row)
+    @pivot_log << {
+      phase:        phase,
+      entering:     pivot_column,
+      leaving:      leaving_var,
+      pivot_row:    pivot_row,
+      pivot_column: pivot_column,
+    }
     replace_basic_variable(leaving_var => pivot_column)
 
     pivot_ratio = Rational(1, @a[pivot_row][pivot_column])
@@ -103,6 +180,122 @@ class Simplex
     end
 
     update_solution
+  end
+
+  # Rebuild the tableau from the pristine model data so that the columns
+  # of the current basic variables form an identity matrix.
+  def refactorize
+    @c = Vector[*@orig_c.to_a]
+    @a = @orig_a.map {|row| Vector[*row.to_a] }
+    @b = Vector[*@rhs.to_a]
+
+    assigned_rows = []
+    @basic_vars.each do |var|
+      row_ix = (row_indices - assigned_rows).detect {|ix| @a[ix][var] != 0 }
+      raise BasisError, "basis is singular for this model" unless row_ix
+
+      ratio = Rational(1, @a[row_ix][var])
+      @a[row_ix] *= ratio
+      @b[row_ix] = ratio * @b[row_ix]
+
+      @c -= @c[var] * @a[row_ix]
+
+      (row_indices - [row_ix]).each do |other_ix|
+        r = @a[other_ix][var]
+        next if r == 0
+        @a[other_ix] -= r * @a[row_ix]
+        @b[other_ix] -= r * @b[row_ix]
+      end
+
+      assigned_rows << row_ix
+    end
+
+    @x = Vector[*([0]*@num_vars)]
+    @needs_refactorize = false
+    update_solution
+  end
+
+  # A signature of the model coefficients (objective and constraint
+  # matrix, but not the right-hand side). Used to make sure a saved
+  # basis is only applied to the model it was saved from.
+  def model_signature
+    {
+      num_non_slack_vars: @num_non_slack_vars,
+      num_constraints:    @num_constraints,
+      objective:          @orig_c.to_a,
+      constraints:        @orig_a.map {|row| row.to_a },
+    }
+  end
+
+  # Save the current basis (e.g. the optimal basis after solving) so it
+  # can be reused later via warm_start.
+  def save_basis
+    Basis.new(@basic_vars.dup, model_signature)
+  end
+
+  # Install a previously saved basis. The basis is only accepted if it
+  # was saved from a model with identical coefficients (the right-hand
+  # side may differ). The next solve rebuilds the tableau from this
+  # basis and, if necessary, uses the dual simplex method to restore
+  # feasibility.
+  def warm_start(basis)
+    raise ArgumentError, "expected a Simplex::Basis" unless basis.is_a?(Basis)
+    unless basis.signature == model_signature
+      raise ArgumentError, "basis was saved from a different model"
+    end
+    vars = basis.basic_vars
+    unless vars.length == @num_constraints &&
+           vars.uniq.length == vars.length &&
+           vars.all? {|var| var.is_a?(Integer) && var >= 0 && var < @num_vars }
+      raise ArgumentError, "basis variables are invalid for this model"
+    end
+    @basic_vars = vars.dup
+    @pivot_log.clear
+    @needs_refactorize = true
+    self
+  end
+
+  # Replace the right-hand side and re-optimize from the current basis
+  # on the next solve.
+  def update_rhs(new_rhs)
+    unless new_rhs.length == @num_constraints
+      raise ArgumentError, "right-hand side has the wrong number of entries"
+    end
+    @rhs = Vector[*new_rhs.to_a]
+    @pivot_log.clear
+    @needs_refactorize = true
+    self
+  end
+
+  # Append one constraint with its own slack variable. If the current
+  # solution violates the new constraint, the next solve restores
+  # feasibility with the dual simplex method.
+  def add_constraint(coeffs, rhs)
+    unless coeffs.length == @num_non_slack_vars
+      raise ArgumentError, "constraint has the wrong number of coefficients"
+    end
+    new_var = @num_vars
+    @orig_c = Vector[*(@orig_c.to_a + [0])]
+    @orig_a.each_with_index do |row, row_ix|
+      @orig_a[row_ix] = Vector[*(row.to_a + [0])]
+    end
+    @orig_a << Vector[*(coeffs.clone + [0]*@num_constraints + [1])]
+    @rhs = Vector[*(@rhs.to_a + [rhs])]
+    @num_constraints += 1
+    @num_vars         += 1
+    @basic_vars << new_var
+    @x = Vector[*(@x.to_a + [0])]
+    @pivot_log.clear
+    @needs_refactorize = true
+    self
+  end
+
+  # Value of the objective function at the optimal solution.
+  def objective_value
+    solve
+    current_solution.zip(@objective_coeffs).inject(0) do |sum, (value, coeff)|
+      sum + value * coeff
+    end
   end
 
   def replace_basic_variable(hash)
@@ -189,4 +382,3 @@ class Simplex
   end
 
 end
-

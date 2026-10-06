@@ -8,6 +8,12 @@ A naive pure-Ruby implementation of the Simplex algorithm for solving linear pro
 
 ### Changes
 
+**1.3**: Adds `save_basis`/`warm_start` for reusing an optimal basis when the
+right-hand side changes, `update_rhs` and `add_constraint` for modifying the
+model, dual-simplex feasibility restoration, `objective_value` and a
+`pivot_log` of the re-optimization. Raises `Simplex::InfeasibleProblem` if
+the problem is infeasible.
+
 **1.2**: Raises `Simplex::UnboundedProblem` if the problem is unbounded.
 
 ### Why?
@@ -65,3 +71,34 @@ You can manually iterate the algorithm, and review the tableau at each step. For
       0.000   *1.500   -0.500    1.000  |    1.000
 
 The asterisk indicates what will be the pivot row and column for the next pivot.
+
+### Re-optimization: warm starts and model modifications
+
+When the objective and constraint coefficients stay the same but the
+right-hand side changes repeatedly, the optimal basis from the previous
+solve can be reused instead of solving from scratch:
+
+    simplex = Simplex.new(c, a, b)
+    simplex.solution
+    basis = simplex.save_basis
+
+    warm = Simplex.new(c, a, new_b)
+    warm.warm_start(basis)  # ArgumentError if the basis belongs to another model
+    warm.solution
+
+The same object can also be modified in place:
+
+    simplex.update_rhs(new_b)          # change the right-hand side
+    simplex.add_constraint([1, 1], 2)  # append one constraint
+    simplex.solution
+
+If the saved basis is no longer feasible for the new right-hand side (or
+the added constraint is violated), feasibility is restored with the dual
+simplex method. If the problem itself has become infeasible,
+`Simplex::InfeasibleProblem` is raised; after fixing the right-hand side
+the same object can be solved again.
+
+Every re-optimization records its pivots in `simplex.pivot_log` (entries
+with `phase` `:primal` or `:dual`, `entering`/`leaving` variables and the
+pivot position), and `simplex.objective_value` returns the optimal value
+of the objective function.
