@@ -10,11 +10,31 @@ class Simplex
   class UnboundedProblem < StandardError
   end
 
+  class InfeasibleProblem < StandardError
+  end
+
+  # A saved optimal basis. Belongs to exactly one model: the fingerprint
+  # captures the objective coefficients, the constraint matrix and the
+  # problem dimensions, so a basis saved from one model cannot be
+  # (mis)applied to another.
+  class Basis
+    attr_reader :basic_vars, :reduced_costs, :basis_inverse, :fingerprint
+
+    def initialize(basic_vars, reduced_costs, basis_inverse, fingerprint)
+      @basic_vars     = basic_vars
+      @reduced_costs  = reduced_costs
+      @basis_inverse  = basis_inverse
+      @fingerprint    = fingerprint
+    end
+  end
+
   attr_accessor :max_pivots
+  attr_reader :pivot_history
 
   def initialize(c, a, b)
     @pivot_count = 0
     @max_pivots = DEFAULT_MAX_PIVOTS
+    @pivot_history = []
 
     # Problem dimensions
     @num_non_slack_vars = a.first.length
@@ -36,6 +56,14 @@ class Simplex
     @x          = Vector[*([0]*@num_vars)]
     @basic_vars = (@num_non_slack_vars...@num_vars).to_a
     update_solution
+
+    # Keep pristine copies of the model so a saved basis can be
+    # re-expanded into a tableau later (warm start), even after the
+    # working tableau has been mutated by pivots.
+    @objective_c = c.clone
+    @initial_c   = @c.clone
+    @initial_a   = @a.map {|row| Vector[*row.to_a] }
+    @initial_b   = Vector[*b.clone]
   end
 
   def solution
@@ -45,6 +73,106 @@ class Simplex
 
   def current_solution
     @x.to_a[0...@num_non_slack_vars]
+  end
+
+  def objective_value
+    current_solution.each_with_index.reduce(0) do |sum, (x_i, i)|
+      sum + @objective_c[i] * x_i
+    end
+  end
+
+  def feasible?
+    @b.all? {|b_i| b_i >= 0 }
+  end
+
+  # Save the current basis (typically the optimal one, after #solve)
+  # together with everything needed to rebuild the tableau for a
+  # modified right-hand side later.
+  def save_basis
+    basis_inverse = @a.map {|row| row.to_a[@num_non_slack_vars..-1] }
+    Basis.new(@basic_vars.dup, @c.dup, basis_inverse, model_fingerprint)
+  end
+
+  # Re-optimize after the right-hand side changed, reusing a previously
+  # saved optimal basis. The reduced costs do not depend on b, so the
+  # rebuilt tableau is still dual feasible; if some basic variables
+  # became negative the dual simplex method restores primal
+  # feasibility, then the primal method finishes the job.
+  #
+  # Raises ArgumentError if the basis was saved from a different model.
+  # Raises InfeasibleProblem if the new rhs makes the problem infeasible
+  # (the object can still be reused afterwards via another warm_start).
+  def warm_start(basis, new_b = nil)
+    unless basis.is_a?(Basis) && basis.fingerprint == model_fingerprint
+      raise ArgumentError, "Basis was saved from a different model"
+    end
+    new_b ||= @initial_b.to_a
+    unless new_b.length == @num_constraints
+      raise ArgumentError, "Right-hand side has wrong dimension"
+    end
+
+    @pivot_history = []
+
+    b_inv = Matrix.rows(basis.basis_inverse)
+    a0    = Matrix.rows(@initial_a.map {|row| row.to_a })
+
+    @a = (b_inv * a0).row_vectors
+    @b = b_inv * Vector[*new_b]
+    @c = basis.reduced_costs.dup
+    @basic_vars = basis.basic_vars.dup
+    update_solution
+
+    dual_solve
+    solve
+    self
+  end
+
+  # Append one more inequality constraint (coeffs . x <= rhs) to the
+  # model, then re-optimize. The current optimum stays dual feasible,
+  # so if the new constraint is violated the dual simplex method
+  # restores feasibility.
+  def add_constraint(coeffs, rhs)
+    unless coeffs.length == @num_non_slack_vars
+      raise ArgumentError, "Constraint has wrong dimension"
+    end
+
+    @pivot_history = []
+
+    new_slack_var = @num_vars
+
+    # extend existing rows and the objective with the new slack column
+    @c = Vector[*(@c.to_a + [0])]
+    @a.each_index {|i| @a[i] = Vector[*(@a[i].to_a + [0])] }
+
+    # express the new row in terms of the current non-basic variables
+    new_row = Vector[*(coeffs.clone + [0]*@num_constraints + [1])]
+    new_rhs = rhs
+    row_indices.each do |row_ix|
+      factor = new_row[basic_variable_in_row(row_ix)]
+      next if factor == 0
+      new_row -= factor * @a[row_ix]
+      new_rhs -= factor * @b[row_ix]
+    end
+
+    @a << new_row
+    @b = Vector[*(@b.to_a + [new_rhs])]
+    @x = Vector[*(@x.to_a + [0])]
+    @basic_vars << new_slack_var
+    @num_constraints += 1
+    @num_vars        += 1
+
+    # keep the pristine model in sync so future bases/warm starts
+    # refer to the extended model (old bases are invalidated)
+    @initial_c = Vector[*(@initial_c.to_a + [0])]
+    @initial_a.each_index {|i| @initial_a[i] = Vector[*(@initial_a[i].to_a + [0])] }
+    @initial_a << Vector[*(coeffs.clone + [0]*(@num_constraints - 1) + [1])]
+    @initial_b = Vector[*(@initial_b.to_a + [rhs])]
+
+    update_solution
+
+    dual_solve
+    solve
+    self
   end
 
   def update_solution
@@ -83,6 +211,37 @@ class Simplex
     pivot_column = entering_variable
     pivot_row    = pivot_row(pivot_column)
     raise UnboundedProblem unless pivot_row
+    pivot_at(pivot_row, pivot_column, :primal)
+  end
+
+  # Dual simplex: while the current basic solution is primal infeasible
+  # (some b < 0) but dual feasible (all reduced costs >= 0), pivot the
+  # most violated row out of the basis. Raises InfeasibleProblem when a
+  # violated row has no negative coefficient, i.e. the problem itself
+  # is infeasible.
+  def dual_solve
+    while (pivot_row = dual_leaving_row)
+      @pivot_count += 1
+      raise "Too many pivots" if @pivot_count > max_pivots
+      pivot_column = dual_entering_column(pivot_row)
+      raise InfeasibleProblem unless pivot_column
+      pivot_at(pivot_row, pivot_column, :dual)
+    end
+  end
+
+  def dual_leaving_row
+    row_indices.select {|row_ix| @b[row_ix] < 0 }.
+                min_by {|row_ix| @b[row_ix] }
+  end
+
+  def dual_entering_column(pivot_row)
+    candidates = column_indices.select {|col_ix| @a[pivot_row][col_ix] < 0 }.
+                                map {|col_ix| [col_ix, @c[col_ix], @a[pivot_row][col_ix]] }
+    column_ix, _, _ = *last_min_by(candidates) {|_, c, a| c / -a }
+    column_ix
+  end
+
+  def pivot_at(pivot_row, pivot_column, phase)
     leaving_var  = basic_variable_in_row(pivot_row)
     replace_basic_variable(leaving_var => pivot_column)
 
@@ -103,6 +262,13 @@ class Simplex
     end
 
     update_solution
+
+    @pivot_history << {
+      :phase    => phase,
+      :entering => pivot_column,
+      :leaving  => leaving_var,
+      :row      => pivot_row,
+    }
   end
 
   def replace_basic_variable(hash)
@@ -188,5 +354,15 @@ class Simplex
     raise unless boolean
   end
 
-end
+  private
 
+  def model_fingerprint
+    [
+      @num_non_slack_vars,
+      @num_constraints,
+      @objective_c,
+      @initial_a.map {|row| row.to_a },
+    ]
+  end
+
+end

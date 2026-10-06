@@ -8,6 +8,14 @@ A naive pure-Ruby implementation of the Simplex algorithm for solving linear pro
 
 ### Changes
 
+**1.3**: Warm starts and model updates. `save_basis` captures the optimal basis,
+`warm_start(basis, new_b)` re-optimizes after the right-hand side changes
+(using the dual simplex method to restore feasibility when needed), and
+`add_constraint(coeffs, rhs)` appends a constraint and re-optimizes.
+Bases are fingerprinted, so a basis saved from one model cannot be applied
+to another. Raises `Simplex::InfeasibleProblem` if a modification makes the
+problem infeasible.
+
 **1.2**: Raises `Simplex::UnboundedProblem` if the problem is unbounded.
 
 ### Why?
@@ -65,3 +73,31 @@ You can manually iterate the algorithm, and review the tableau at each step. For
       0.000   *1.500   -0.500    1.000  |    1.000
 
 The asterisk indicates what will be the pivot row and column for the next pivot.
+
+### Warm starts
+
+When the objective and the constraint matrix stay the same and only the
+right-hand side changes repeatedly, reuse the optimal basis instead of
+solving from scratch:
+
+    > simplex = Simplex.new([1, 1], [[2, 1], [1, 2]], [4, 3])
+    > simplex.solution
+    => [(5/3), (2/3)]
+    > basis = simplex.save_basis
+    > simplex.warm_start(basis, [5, 3])   # re-optimizes for the new rhs
+    > simplex.solution
+    => [(7/3), (1/3)]
+    > simplex.pivot_history               # pivots of the re-optimization
+    => []
+
+If the new right-hand side makes the saved basis infeasible, the dual
+simplex method restores feasibility automatically (recorded as
+`:phase => :dual` entries in `pivot_history`). If the problem itself
+became infeasible, `Simplex::InfeasibleProblem` is raised; the object
+remains usable and can be warm-started again with a feasible rhs.
+
+A constraint can also be appended to a solved model:
+
+    > simplex.add_constraint([1, 0], 1)   # adds x <= 1 and re-optimizes
+    > simplex.solution
+    => [1, 1]
