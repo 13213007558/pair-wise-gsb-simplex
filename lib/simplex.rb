@@ -12,9 +12,15 @@ class Simplex
 
   attr_accessor :max_pivots
 
-  def initialize(c, a, b)
+  def initialize(c, a, b, variable_types: nil)
     @pivot_count = 0
     @max_pivots = DEFAULT_MAX_PIVOTS
+
+    # Keep the original data around for solve_milp
+    @objective_coefficients   = c.clone
+    @constraint_coefficients  = a.map {|a1| a1.clone }
+    @constraint_rhs           = b.clone
+    @variable_types           = variable_types
 
     # Problem dimensions
     @num_non_slack_vars = a.first.length
@@ -190,3 +196,4 @@ class Simplex
 
 end
 
+require 'simplex/milp'

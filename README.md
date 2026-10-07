@@ -65,3 +65,51 @@ You can manually iterate the algorithm, and review the tableau at each step. For
       0.000   *1.500   -0.500    1.000  |    1.000
 
 The asterisk indicates what will be the pivot row and column for the next pivot.
+
+### Mixed-integer and 0/1 variables
+
+`solve_milp` adds branch and bound on top of LP relaxations, so variables can
+be declared `:integer` or `:binary` (0/1) in addition to the default
+`:continuous`:
+
+    > simplex = Simplex.new(
+      [5, 4, 3],       # objective coefficients
+      [[3, 2, 2]],     # constraint coefficients
+      [4],             # constraint rhs
+      variable_types: [:binary, :binary, :binary]
+    )
+    > result = simplex.solve_milp
+    > result.status        # => :optimal
+    > result.solution      # => [0, 1, 1]   (best integer solution found)
+    > result.objective     # => 7
+    > result.bound         # => 7           (global bound on the objective)
+    > result.nodes         # => 3           (LP relaxations solved)
+    > result.optimal?      # => true        (optimality proven)
+
+The continuous relaxation optimum is never rounded: an integer solution is
+only recorded when a relaxation optimum is exactly integer-feasible (all
+arithmetic is rational). `result.status` distinguishes the outcomes:
+
+ * `:optimal` - search tree exhausted; `solution` is proven optimal and
+   `bound` equals `objective`.
+ * `:infeasible` - the LP relaxation itself is infeasible.
+ * `:no_integer_solution` - the relaxation is feasible, but the exhausted
+   search found no integer-feasible point.
+ * `:unbounded` - the LP relaxation is unbounded.
+ * `:node_limit` - the node budget ran out; any incumbent is returned in
+   `solution` and `bound` remains a valid global bound on the optimum.
+
+The search is deterministic and controlled by explicit strategies:
+
+    simplex.solve_milp(
+      max_nodes: 1000,               # node budget (default 10_000)
+      node_strategy: :best_bound,    # or :depth_first
+      branch_strategy: :most_fractional  # or :first
+    )
+
+With `:best_bound` the open node with the largest relaxation bound is
+explored first (ties go to the most recently created node, so the down
+branch goes first); `:depth_first` always takes the most recently created
+node. `:most_fractional` branches on the integer variable whose value is
+closest to a half, `:first` on the lowest-indexed fractional one; ties are
+broken by variable index.
